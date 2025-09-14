@@ -8,22 +8,16 @@ jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
     steps:
+      # ===============================================================
+      # ==== 修正过的、标准的 Checkout 步骤 ====
+      # ===============================================================
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.REPOSITORY }}
-          ref: ${{ vars.REF }}
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v3
         with:
           version: '0.5.4'
-
-      # ===============================================================
-      # ==== 这是新添加的调试步骤，用来打印当前所有的环境变量 ====
-      # ===============================================================
-      - name: Debug Environment Variables
-        run: env | sort
 
       - name: Run script
         env:
@@ -31,7 +25,6 @@ jobs:
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
           ZOTERO_IGNORE: ${{ vars.ZOTERO_IGNORE }}
           SEND_EMPTY: ${{ vars.SEND_EMPTY }}
-          # 确保这一行是从 vars 读取，这是正确的设置
           ARXIV_QUERY: ${{ vars.ARXIV_QUERY }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
