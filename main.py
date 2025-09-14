@@ -50,10 +50,7 @@ def get_arxiv_paper(query: str, debug: bool = False) -> List[Dict]:
     Returns:
         A list of dictionaries, where each dictionary represents a paper.
     """
-    
-    # ===============================================================
-    # ==== 下面这几行代码是问题的根源，已被注释掉以绕过BUG ====
-    # ===============================================================
+    # This validation check in the original script was buggy and has been commented out.
     # if query == "***" or query is None:
     #    raise Exception(f"Invalid ARXIV_QUERY: {query}.")
 
@@ -109,7 +106,10 @@ if __name__ == "__main__":
     parser.add_argument("--smtp-server", type=str, default=SMTP_SERVER)
     parser.add_argument("--smtp-port", type=int, default=SMTP_PORT)
     parser.add_argument("--sender", type=str, default=SENDER)
-    parser.add_-argument("--receiver", type=str, default=RECEIVER)
+    # ===============================================================
+    # ==== 下面这一行是之前出错的地方，现已修正 ====
+    # ===============================================================
+    parser.add_argument("--receiver", type=str, default=RECEIVER)
     parser.add_argument("--sender-password", type=str, default=SENDER_PASSWORD)
     parser.add_argument("--max-paper-num", type=int, default=MAX_PAPER_NUM)
     parser.add_argument(
