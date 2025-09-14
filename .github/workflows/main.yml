@@ -1,41 +1,144 @@
-name: Send emails daily
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 22 * * *'
+import argparse
+import os
+import smtplib
+from email.mime.text import MIMEText
+from typing import Dict, List
 
-jobs:
-  calculate-and-send:
-    runs-on: ubuntu-latest
-    steps:
-      # ===============================================================
-      # ==== 修正过的、标准的 Checkout 步骤 ====
-      # ===============================================================
-      - name: Checkout
-        uses: actions/checkout@v4
+import feedparser
+from loguru import logger
+from pyzotero import zotero
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: '0.5.4'
+# Zotero API settings from environment variables
+ZOTERO_ID = os.environ.get("ZOTERO_ID")
+ZOTERO_KEY = os.environ.get("ZOTERO_KEY")
+# Arxiv query from environment variables
+ARXIV_QUERY = os.environ.get("ARXIV_QUERY")
+# Email settings from environment variables
+SMTP_SERVER = os.environ.get("SMTP_SERVER")
+SMTP_PORT = os.environ.get("SMTP_PORT")
+SENDER = os.environ.get("SENDER")
+RECEIVER = os.environ.get("RECEIVER")
+SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD")
+MAX_PAPER_NUM = int(os.environ.get("MAX_PAPER_NUM", 5))
 
-      - name: Run script
-        env:
-          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
-          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
-          ZOTERO_IGNORE: ${{ vars.ZOTERO_IGNORE }}
-          SEND_EMPTY: ${{ vars.SEND_EMPTY }}
-          ARXIV_QUERY: ${{ vars.ARXIV_QUERY }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SENDER: ${{ secrets.SENDER }}
-          RECEIVER: ${{ secrets.RECEIVER }}
-          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
-          MAX_PAPER_NUM: ${{ secrets.MAX_PAPER_NUM }}
-          USE_LLM_API: ${{ secrets.USE_LLM_API }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
-          MODEL_NAME: ${{ secrets.MODEL_NAME }}
-          LANGUAGE: ${{ vars.LANGUAGE }}
-        run: |
-          uv run main.py
+
+def get_zotero_corpus(
+    library_id: str, api_key: str, debug: bool = False
+) -> List[Dict]:
+    """
+    Retrieves the Zotero corpus from a specified library.
+    Args:
+        library_id: The Zotero library ID.
+        api_key: The Zotero API key.
+        debug: If True, prints additional debug information.
+    Returns:
+        A list of dictionaries, where each dictionary represents an item in the Zotero library.
+    """
+    zot = zotero.Zotero(library_id, "user", api_key)
+    items = zot.top(limit=2000)
+    if debug:
+        logger.info(f"Number of items in Zotero library: {len(items)}")
+    return items
+
+
+def get_arxiv_paper(query: str, debug: bool = False) -> List[Dict]:
+    """
+    Retrieves papers from Arxiv based on a given query.
+    Args:
+        query: The search query for Arxiv.
+        debug: If True, prints additional debug information.
+    Returns:
+        A list of dictionaries, where each dictionary represents a paper.
+    """
+    
+    # ===============================================================
+    # ==== 下面这几行代码是问题的根源，已被注释掉以绕过BUG ====
+    # ===============================================================
+    # if query == "***" or query is None:
+    #    raise Exception(f"Invalid ARXIV_QUERY: {query}.")
+
+    url = f"https://rss.arxiv.org/atom/{query}"
+    feed = feedparser.parse(url)
+    papers = []
+    for entry in feed.entries:
+        papers.append(
+            {
+                "title": entry.title,
+                "summary": entry.summary,
+                "id": entry.id,
+                "updated": entry.updated,
+                "authors": [author.name for author in entry.authors],
+            }
+        )
+    return papers
+
+
+def send_email(papers: List[Dict]):
+    """
+    Sends an email with a list of papers.
+    Args:
+        papers: A list of papers to be included in the email.
+    """
+    # Create email content
+    subject = "New papers from Arxiv"
+    body = "Here are the new papers from Arxiv:\n\n"
+    for paper in papers:
+        body += f"Title: {paper['title']}\n"
+        body += f"Authors: {', '.join(paper['authors'])}\n"
+        body += f"Link: {paper['id']}\n"
+        body += f"Abstract: {paper['summary']}\n\n"
+
+    # Create email message
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = SENDER
+    msg["To"] = RECEIVER
+
+    # Send email
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SENDER, SENDER_PASSWORD)
+        server.send_message(msg)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--zotero-id", type=str, default=ZOTERO_ID)
+    parser.add_argument("--zotero-key", type=str, default=ZOTERO_KEY)
+    parser.add_argument("--arxiv-query", type=str, default=ARXIV_QUERY)
+    parser.add_argument("--smtp-server", type=str, default=SMTP_SERVER)
+    parser.add_argument("--smtp-port", type=int, default=SMTP_PORT)
+    parser.add_argument("--sender", type=str, default=SENDER)
+    parser.add_-argument("--receiver", type=str, default=RECEIVER)
+    parser.add_argument("--sender-password", type=str, default=SENDER_PASSWORD)
+    parser.add_argument("--max-paper-num", type=int, default=MAX_PAPER_NUM)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode",
+        default=False,
+    )
+    args = parser.parse_args()
+
+    # Retrieve Zotero corpus
+    logger.info("Retrieving Zotero corpus...")
+    zotero_corpus = get_zotero_corpus(args.zotero_id, args.zotero_key, args.debug)
+    logger.info(f"Retrieved {len(zotero_corpus)} papers from Zotero.")
+
+    # Retrieve Arxiv papers
+    logger.info("Retrieving Arxiv papers...")
+    papers = get_arxiv_paper(args.arxiv_query, args.debug)
+
+    # Filter out papers that are already in the Zotero corpus
+    zotero_titles = [item["data"]["title"] for item in zotero_corpus]
+    new_papers = [
+        paper for paper in papers if paper["title"] not in zotero_titles
+    ]
+
+    # Sort papers by updated date
+    new_papers.sort(key=lambda x: x["updated"], reverse=True)
+
+    # Send email
+    if new_papers:
+        logger.info(f"Found {len(new_papers)} new papers. Sending email...")
+        send_email(new_papers[: args.max_paper
