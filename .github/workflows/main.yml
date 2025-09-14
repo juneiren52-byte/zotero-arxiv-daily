@@ -141,4 +141,6 @@ if __name__ == "__main__":
     # Send email
     if new_papers:
         logger.info(f"Found {len(new_papers)} new papers. Sending email...")
-        send_email(new_papers[: args.max_paper
+        send_email(new_papers[: args.max_paper_num])
+    else:
+        logger.info("No new papers found.")
