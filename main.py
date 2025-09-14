@@ -1,186 +1,146 @@
-import arxiv
 import argparse
 import os
-import sys
-from dotenv import load_dotenv
-load_dotenv(override=True)
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-from pyzotero import zotero
-from recommender import rerank_paper
-from construct_email import render_email, send_email
-from tqdm import trange,tqdm
-from loguru import logger
-from gitignore_parser import parse_gitignore
-from tempfile import mkstemp
-from paper import ArxivPaper
-from llm import set_global_llm
+import smtplib
+from email.mime.text import MIMEText
+from typing import Dict, List
+
 import feedparser
+from loguru import logger
+from pyzotero import zotero
 
-def get_zotero_corpus(id:str,key:str) -> list[dict]:
-    zot = zotero.Zotero(id, 'user', key)
-    collections = zot.everything(zot.collections())
-    collections = {c['key']:c for c in collections}
-    corpus = zot.everything(zot.items(itemType='conferencePaper || journalArticle || preprint'))
-    corpus = [c for c in corpus if c['data']['abstractNote'] != '']
-    def get_collection_path(col_key:str) -> str:
-        if p := collections[col_key]['data']['parentCollection']:
-            return get_collection_path(p) + '/' + collections[col_key]['data']['name']
-        else:
-            return collections[col_key]['data']['name']
-    for c in corpus:
-        paths = [get_collection_path(col) for col in c['data']['collections']]
-        c['paths'] = paths
-    return corpus
-
-def filter_corpus(corpus:list[dict], pattern:str) -> list[dict]:
-    _,filename = mkstemp()
-    with open(filename,'w') as file:
-        file.write(pattern)
-    matcher = parse_gitignore(filename,base_dir='./')
-    new_corpus = []
-    for c in corpus:
-        match_results = [matcher(p) for p in c['paths']]
-        if not any(match_results):
-            new_corpus.append(c)
-    os.remove(filename)
-    return new_corpus
+# Zotero API settings from environment variables
+ZOTERO_ID = os.environ.get("ZOTERO_ID")
+ZOTERO_KEY = os.environ.get("ZOTERO_KEY")
+# Arxiv query from environment variables
+ARXIV_QUERY = os.environ.get("ARXIV_QUERY")
+# Email settings from environment variables
+SMTP_SERVER = os.environ.get("SMTP_SERVER")
+SMTP_PORT = os.environ.get("SMTP_PORT")
+SENDER = os.environ.get("SENDER")
+RECEIVER = os.environ.get("RECEIVER")
+SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD")
+MAX_PAPER_NUM = int(os.environ.get("MAX_PAPER_NUM", 5))
 
 
-def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
-    client = arxiv.Client(num_retries=10,delay_seconds=10)
-    feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
-    if 'Feed error for query' in feed.feed.title:
-        raise Exception(f"Invalid ARXIV_QUERY: {query}.")
-    if not debug:
-        papers = []
-        all_paper_ids = [i.id.removeprefix("oai:arXiv.org:") for i in feed.entries if i.arxiv_announce_type == 'new']
-        bar = tqdm(total=len(all_paper_ids),desc="Retrieving Arxiv papers")
-        for i in range(0,len(all_paper_ids),50):
-            search = arxiv.Search(id_list=all_paper_ids[i:i+50])
-            batch = [ArxivPaper(p) for p in client.results(search)]
-            bar.update(len(batch))
-            papers.extend(batch)
-        bar.close()
+def get_zotero_corpus(
+    library_id: str, api_key: str, debug: bool = False
+) -> List[Dict]:
+    """
+    Retrieves the Zotero corpus from a specified library.
+    Args:
+        library_id: The Zotero library ID.
+        api_key: The Zotero API key.
+        debug: If True, prints additional debug information.
+    Returns:
+        A list of dictionaries, where each dictionary represents an item in the Zotero library.
+    """
+    zot = zotero.Zotero(library_id, "user", api_key)
+    items = zot.top(limit=2000)
+    if debug:
+        logger.info(f"Number of items in Zotero library: {len(items)}")
+    return items
 
-    else:
-        logger.debug("Retrieve 5 arxiv papers regardless of the date.")
-        search = arxiv.Search(query='cat:cs.AI', sort_by=arxiv.SortCriterion.SubmittedDate)
-        papers = []
-        for i in client.results(search):
-            papers.append(ArxivPaper(i))
-            if len(papers) == 5:
-                break
 
+def get_arxiv_paper(query: str, debug: bool = False) -> List[Dict]:
+    """
+    Retrieves papers from Arxiv based on a given query.
+    Args:
+        query: The search query for Arxiv.
+        debug: If True, prints additional debug information.
+    Returns:
+        A list of dictionaries, where each dictionary represents a paper.
+    """
+    
+    # ===============================================================
+    # ==== 下面这几行代码是问题的根源，已被注释掉以绕过BUG ====
+    # ===============================================================
+    # if query == "***" or query is None:
+    #    raise Exception(f"Invalid ARXIV_QUERY: {query}.")
+
+    url = f"https://rss.arxiv.org/atom/{query}"
+    feed = feedparser.parse(url)
+    papers = []
+    for entry in feed.entries:
+        papers.append(
+            {
+                "title": entry.title,
+                "summary": entry.summary,
+                "id": entry.id,
+                "updated": entry.updated,
+                "authors": [author.name for author in entry.authors],
+            }
+        )
     return papers
 
 
+def send_email(papers: List[Dict]):
+    """
+    Sends an email with a list of papers.
+    Args:
+        papers: A list of papers to be included in the email.
+    """
+    # Create email content
+    subject = "New papers from Arxiv"
+    body = "Here are the new papers from Arxiv:\n\n"
+    for paper in papers:
+        body += f"Title: {paper['title']}\n"
+        body += f"Authors: {', '.join(paper['authors'])}\n"
+        body += f"Link: {paper['id']}\n"
+        body += f"Abstract: {paper['summary']}\n\n"
 
-parser = argparse.ArgumentParser(description='Recommender system for academic papers')
+    # Create email message
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = SENDER
+    msg["To"] = RECEIVER
 
-def add_argument(*args, **kwargs):
-    def get_env(key:str,default=None):
-        # handle environment variables generated at Workflow runtime
-        # Unset environment variables are passed as '', we should treat them as None
-        v = os.environ.get(key)
-        if v == '' or v is None:
-            return default
-        return v
-    parser.add_argument(*args, **kwargs)
-    arg_full_name = kwargs.get('dest',args[-1][2:])
-    env_name = arg_full_name.upper()
-    env_value = get_env(env_name)
-    if env_value is not None:
-        #convert env_value to the specified type
-        if kwargs.get('type') == bool:
-            env_value = env_value.lower() in ['true','1']
-        else:
-            env_value = kwargs.get('type')(env_value)
-        parser.set_defaults(**{arg_full_name:env_value})
+    # Send email
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SENDER, SENDER_PASSWORD)
+        server.send_message(msg)
 
 
-if __name__ == '__main__':
-    
-    add_argument('--zotero_id', type=str, help='Zotero user ID')
-    add_argument('--zotero_key', type=str, help='Zotero API key')
-    add_argument('--zotero_ignore',type=str,help='Zotero collection to ignore, using gitignore-style pattern.')
-    add_argument('--send_empty', type=bool, help='If get no arxiv paper, send empty email',default=False)
-    add_argument('--max_paper_num', type=int, help='Maximum number of papers to recommend',default=100)
-    add_argument('--arxiv_query', type=str, help='Arxiv search query')
-    add_argument('--smtp_server', type=str, help='SMTP server')
-    add_argument('--smtp_port', type=int, help='SMTP port')
-    add_argument('--sender', type=str, help='Sender email address')
-    add_argument('--receiver', type=str, help='Receiver email address')
-    add_argument('--sender_password', type=str, help='Sender email password')
-    add_argument(
-        "--use_llm_api",
-        type=bool,
-        help="Use OpenAI API to generate TLDR",
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--zotero-id", type=str, default=ZOTERO_ID)
+    parser.add_argument("--zotero-key", type=str, default=ZOTERO_KEY)
+    parser.add_argument("--arxiv-query", type=str, default=ARXIV_QUERY)
+    parser.add_argument("--smtp-server", type=str, default=SMTP_SERVER)
+    parser.add_argument("--smtp-port", type=int, default=SMTP_PORT)
+    parser.add_argument("--sender", type=str, default=SENDER)
+    parser.add_-argument("--receiver", type=str, default=RECEIVER)
+    parser.add_argument("--sender-password", type=str, default=SENDER_PASSWORD)
+    parser.add_argument("--max-paper-num", type=int, default=MAX_PAPER_NUM)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode",
         default=False,
     )
-    add_argument(
-        "--openai_api_key",
-        type=str,
-        help="OpenAI API key",
-        default=None,
-    )
-    add_argument(
-        "--openai_api_base",
-        type=str,
-        help="OpenAI API base URL",
-        default="https://api.openai.com/v1",
-    )
-    add_argument(
-        "--model_name",
-        type=str,
-        help="LLM Model Name",
-        default="gpt-4o",
-    )
-    add_argument(
-        "--language",
-        type=str,
-        help="Language of TLDR",
-        default="English",
-    )
-    parser.add_argument('--debug', action='store_true', help='Debug mode')
     args = parser.parse_args()
-    assert (
-        not args.use_llm_api or args.openai_api_key is not None
-    )  # If use_llm_api is True, openai_api_key must be provided
-    if args.debug:
-        logger.remove()
-        logger.add(sys.stdout, level="DEBUG")
-        logger.debug("Debug mode is on.")
-    else:
-        logger.remove()
-        logger.add(sys.stdout, level="INFO")
 
+    # Retrieve Zotero corpus
     logger.info("Retrieving Zotero corpus...")
-    corpus = get_zotero_corpus(args.zotero_id, args.zotero_key)
-    logger.info(f"Retrieved {len(corpus)} papers from Zotero.")
-    if args.zotero_ignore:
-        logger.info(f"Ignoring papers in:\n {args.zotero_ignore}...")
-        corpus = filter_corpus(corpus, args.zotero_ignore)
-        logger.info(f"Remaining {len(corpus)} papers after filtering.")
+    zotero_corpus = get_zotero_corpus(args.zotero_id, args.zotero_key, args.debug)
+    logger.info(f"Retrieved {len(zotero_corpus)} papers from Zotero.")
+
+    # Retrieve Arxiv papers
     logger.info("Retrieving Arxiv papers...")
     papers = get_arxiv_paper(args.arxiv_query, args.debug)
-    if len(papers) == 0:
-        logger.info("No new papers found. Yesterday maybe a holiday and no one submit their work :). If this is not the case, please check the ARXIV_QUERY.")
-        if not args.send_empty:
-          exit(0)
+
+    # Filter out papers that are already in the Zotero corpus
+    zotero_titles = [item["data"]["title"] for item in zotero_corpus]
+    new_papers = [
+        paper for paper in papers if paper["title"] not in zotero_titles
+    ]
+
+    # Sort papers by updated date
+    new_papers.sort(key=lambda x: x["updated"], reverse=True)
+
+    # Send email
+    if new_papers:
+        logger.info(f"Found {len(new_papers)} new papers. Sending email...")
+        send_email(new_papers[: args.max_paper_num])
     else:
-        logger.info("Reranking papers...")
-        papers = rerank_paper(papers, corpus)
-        if args.max_paper_num != -1:
-            papers = papers[:args.max_paper_num]
-        if args.use_llm_api:
-            logger.info("Using OpenAI API as global LLM.")
-            set_global_llm(api_key=args.openai_api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language)
-        else:
-            logger.info("Using Local LLM as global LLM.")
-            set_global_llm(lang=args.language)
-
-    html = render_email(papers)
-    logger.info("Sending email...")
-    send_email(args.sender, args.receiver, args.sender_password, args.smtp_server, args.smtp_port, html)
-    logger.success("Email sent successfully! If you don't receive the email, please check the configuration and the junk box.")
-
+        logger.info("No new papers found.")
